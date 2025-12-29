@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from typing import Callable, Dict, Iterator, List, Literal, Union, Any, Sequence, Self, override
+from typing import Callable, Dict, Iterator, List, Literal, Tuple, Union, Any, Sequence, Self, override
 
 Number = Union[int, float]
 PointType = Union["BasePoint", "Point"]
@@ -101,10 +101,6 @@ class ITransformable:
             [0, 0, 0, 1]
         ])
 
-        print(rotation_x)
-        print(rotation_y)
-        print(rotation_z)
-
         rotation_matrix = rotation_z @ rotation_y @ rotation_x
         return self.transform(rotation_matrix)
     
@@ -167,9 +163,10 @@ class BasePoint(metaclass=BaseShape):
 
 
 class Point(BasePoint, ITransformable):
-    def __init__(self, x: Number, y: Number, z: Number) -> None:
+    def __init__(self, x: Number, y: Number, z: Number, w: Number = 1.0) -> None:
         BasePoint.__init__(self, x, y, z)
         ITransformable.__init__(self)
+        self.w = w
         self.__features: Dict[str, Any] = dict()
 
     @override
@@ -400,3 +397,80 @@ class BaseCanvas(ITransformable):
         self.points.clear()
         self.edges.clear()
         self.polygons.clear()
+
+
+class ObjLoaderError(ValueError):
+    pass
+
+class ObjLoader:
+    def __init__(self) -> None:
+        self.points: List[Point] = []
+        self.edges: List[Edge] = []
+        self.polygons: List[Polygon] = []
+    
+    def load(self, filepath: str) -> None:
+        if not filepath.endswith('.obj'):
+            raise ObjLoaderError("Only .obj files are supported.")
+
+        with open(filepath, 'r') as file:
+            lines = file.readlines()
+        
+        for line in lines:
+            try:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                
+                if parts[0] == 'v':
+                    x, y, z = map(float, parts[1:4])
+                    w = float(parts[4]) if len(parts) > 4 else 1.0
+                    self.points.append(Point(x, y, z, w))
+
+                elif parts[0] == 'vt':
+                    continue
+
+                elif parts[0] == 'vn':
+                    continue
+                
+                elif parts[0] == 'f':
+                    vertex_indices = [int(part.split('/')[0]) - 1 for part in parts[1:]]
+                    face_points = [self.points[idx] for idx in vertex_indices]
+                    
+                    if len(face_points) == 2:
+                        self.edges.append(Edge(face_points))
+                    elif len(face_points) > 2:
+                        edges = []
+                        for i in range(len(face_points)):
+                            edge = Edge([face_points[i], face_points[(i + 1) % len(face_points)]])
+                            edges.append(edge)
+                        self.polygons.append(Polygon(edges))
+
+            except (ValueError, IndexError) as e:
+                raise ObjLoaderError(f"Error parsing line: '{line.strip()}'. {e}") from e
+    
+    def __call__(self, dx: Number = 0.0, dy: Number = 0.0, dz: Number = 0.0) -> Tuple[List[Point], List[Edge], List[Polygon]]:
+        points, edges, polygons = self.points, self.edges, self.polygons
+
+        if dx != 0.0 or dy != 0.0 or dz != 0.0:
+            for point in points:
+                point.x += dx
+                point.y += dy
+                point.z += dz
+
+            for edge in edges:
+                for point in edge.points:
+                    point.x += dx
+                    point.y += dy
+                    point.z += dz
+            
+            for polygon in polygons:
+                for edge in polygon.edges:
+                    for point in edge.points:
+                        point.x += dx
+                        point.y += dy
+                        point.z += dz
+
+        return points, edges, polygons
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(points={len(self.points)}, edges={len(self.edges)}, polygons={len(self.polygons)}, id={hex(id(self))})"

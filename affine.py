@@ -56,13 +56,10 @@ class TkinterCanvas(BaseCanvas):
             x_screen = (1 - x_ndc) * 0.5 * width
             y_screen = (y_ndc + 1) * 0.5 * height
 
-            print(f"3D Point ({point.x}, {point.y}, {point.z}) -> 2D Point ({x_screen}, {y_screen})")
-
             yield Point(x_screen, y_screen, 0)
     
     def draw_shapes(self) -> None:
         self.tk_canvas.delete("all")
-        print("--- Projection Debug ---")
 
         for point in self.projection_onto_2d(self.points, self.width, self.height):
             self.tk_canvas.create_oval(
@@ -363,7 +360,6 @@ if __name__ == "__main__":
     #     Point(42, 40, 50),
     # ]),
     # ])
-    # print(canvas)
 
     canvas.draw_shapes()
     tkinter.mainloop()
