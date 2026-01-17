@@ -1,25 +1,50 @@
 from __future__ import annotations
+import copy
 import numpy as np
-from typing import Callable, Dict, Iterator, List, Literal, Tuple, Union, Any, Sequence, Self, override
+from typing import Callable, Dict, Iterator, List, Literal, Union, Any, Sequence, Self
+
+try:
+    from typing import override  # type: ignore[attr-defined]
+except ImportError:  # Python < 3.12
+    def override(func: Callable[..., Any]) -> Callable[..., Any]:
+        return func
 
 Number = Union[int, float]
-PointType = Union["BasePoint", "Point"]
+PointType = Union["BasePoint", "Point", "Vertex"]
 EdgeType = Union["BaseEdge", "Edge"]
 PolygonType = Union["BasePolygon", "Polygon"]
+ObjectType = Union["BaseObject", "Object"]
 Shape = Union[PointType, EdgeType, PolygonType]
 
 
 class ITransformable:
+    _W_EPS: float = 1e-12
+
     def __init__(self) -> None:
-        self.points: List[PointType] = self.get_shape_points()
+        pass
 
     def get_shape_points(self) -> List[PointType]:
         raise NotImplementedError("This method should be implemented in subclasses.")
+
+    def _unique_shape_points(self) -> List[PointType]:
+        seen: set[int] = set()
+        unique: List[PointType] = []
+        for point in self.get_shape_points():
+            pid = id(point)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            unique.append(point)
+        return unique
     
     def centered(self, func: Callable[..., Self], *args: Any, **kwargs: Any) -> Self:
-        center_x = sum(point.x for point in self.points) / len(self.points)
-        center_y = sum(point.y for point in self.points) / len(self.points)
-        center_z = sum(point.z for point in self.points) / len(self.points)
+        points = self._unique_shape_points()
+        if not points:
+            return func(*args, **kwargs)
+
+        center_x = sum(point.x for point in points) / len(points)
+        center_y = sum(point.y for point in points) / len(points)
+        center_z = sum(point.z for point in points) / len(points)
 
         self.translate(-center_x, -center_y, -center_z)
         result = func(*args, **kwargs)
@@ -33,22 +58,28 @@ class ITransformable:
         return result
 
     def transform(self, matrix: np.ndarray) -> Self:
-        for point in self.points:
+        for point in self._unique_shape_points():
             vec = np.array([point.x, point.y, point.z, 1])
             transformed_vec = vec @ matrix
-            point.x = transformed_vec[0] / transformed_vec[3]
-            point.y = transformed_vec[1] / transformed_vec[3]
-            point.z = transformed_vec[2] / transformed_vec[3]
+            w = float(transformed_vec[3])
+            if abs(w) < self._W_EPS:
+                raise ZeroDivisionError("Homogeneous w is ~0 during transform; check your matrix/projection.")
+            point.x = float(transformed_vec[0]) / w
+            point.y = float(transformed_vec[1]) / w
+            point.z = float(transformed_vec[2]) / w
         return self
     
     def projection(self, matrix: np.ndarray) -> Iterator[BasePoint]:
-        for point in self.points:
+        for point in self._unique_shape_points():
             vec = np.array([point.x, point.y, point.z, 1])
-            transformed_vec = matrix @ vec
+            transformed_vec = vec @ matrix
+            w = float(transformed_vec[3])
+            if abs(w) < self._W_EPS:
+                raise ZeroDivisionError("Homogeneous w is ~0 during projection; check your matrix/projection.")
             yield BasePoint(
-                transformed_vec[0] / transformed_vec[3],
-                transformed_vec[1] / transformed_vec[3],
-                transformed_vec[2] / transformed_vec[3],
+                float(transformed_vec[0]) / w,
+                float(transformed_vec[1]) / w,
+                float(transformed_vec[2]) / w,
             )
 
     def scale(self, sx: Number, sy: Number, sz: Number) -> Self:
@@ -152,9 +183,6 @@ class BasePoint(metaclass=BaseShape):
 
     def __ne__(self, value: object) -> bool:
         return not self.__eq__(value)
-
-    def __hash__(self) -> int:
-        return hash((self.x, self.y, self.z))
     
     def __iter__(self):
         yield self.x
@@ -204,11 +232,12 @@ class BaseEdge(metaclass=BaseShape):
         return not self.__eq__(value)
     
     def __add__(self, other: Union[PointType, EdgeType]) -> Self:
+        new = copy.copy(self)
         if isinstance(other, BaseEdge):
-            return self.__class__(**self.__dict__, points=self.points + other.points)
-        
+            new.points = self.points + other.points
         else:
-            return self.__class__(**self.__dict__, points=self.points + [other])
+            new.points = self.points + [other]
+        return new
         
     def __iadd__(self, other: Union[PointType, EdgeType]) -> Self:
         if isinstance(other, BaseEdge):
@@ -218,9 +247,6 @@ class BaseEdge(metaclass=BaseShape):
             self.points.append(other)
 
         return self
-    
-    def __hash__(self) -> int:
-        return hash(tuple(self.points))
     
     def __len__(self) -> int:
         return len(self.points)
@@ -274,14 +300,13 @@ class BasePolygon(metaclass=BaseShape):
         return len(self.edges)
     
     def __add__(self, other: EdgeType) -> Self:
-        return self.__class__(**self.__dict__, edges=self.edges + [other])
+        new = copy.copy(self)
+        new.edges = self.edges + [other]
+        return new
     
     def __iadd__(self, other: EdgeType) -> Self:
         self.edges.append(other)
         return self
-    
-    def __hash__(self) -> int:
-        return hash(tuple(self.edges))
     
     def __iter__(self):
         for edge in self.edges:
@@ -296,10 +321,16 @@ class Polygon(BasePolygon, ITransformable):
 
     @override
     def get_shape_points(self) -> List[PointType]:
-        points: List[PointType] = []
+        seen: set[int] = set()
+        unique: List[PointType] = []
         for edge in self.edges:
-            points.extend(edge.points)
-        return points
+            for point in edge.points:
+                pid = id(point)
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                unique.append(point)
+        return unique
     
     def __getitem__(self, item: str) -> Any:
         return self.__features.get(item, None)
@@ -316,6 +347,62 @@ class Polygon(BasePolygon, ITransformable):
             return f"{self.__class__.__name__}({self.edges}, id={hex(id(self))})"
 
 
+class BaseObject(metaclass=BaseShape):
+    def __init__(
+            self,
+            points: Sequence[PointType] = (),
+            edges: Sequence[EdgeType] = (),
+            polygons: Sequence[PolygonType] = (),
+        ) -> None:
+        self.points: List[PointType] = list(points)
+        self.edges: List[EdgeType] = list(edges)
+        self.polygons: List[PolygonType] = list(polygons)
+    
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(points={self.points}, "
+            f"edges={self.edges}, polygons={self.polygons}, id={hex(id(self))})"
+        )
+
+
+class Object(BaseObject, ITransformable):
+    def __init__(
+            self,
+            points: Sequence[PointType] = (),
+            edges: Sequence[EdgeType] = (),
+            polygons: Sequence[PolygonType] = (),
+        ) -> None:
+        BaseObject.__init__(self, points, edges, polygons)
+        ITransformable.__init__(self)
+        self.__features: Dict[str, Any] = dict()
+
+    @override
+    def get_shape_points(self) -> List[PointType]:
+        return self.points
+    
+    def __getitem__(self, item: str) -> Any:
+        return self.__features.get(item, None)
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.__features[key] = value
+
+    def __repr__(self) -> str:
+        features = ", ".join(f"{k}={repr(v)}" for k, v in self.__features.items())
+        if features:
+            return (
+                f"{self.__class__.__name__}(points={self.points}, "
+                f"edges={self.edges}, polygons={self.polygons}, "
+                f"{features}, id={hex(id(self))})"
+            )
+        
+        else:
+            return (
+                f"{self.__class__.__name__}(points={self.points}, "
+                f"edges={self.edges}, polygons={self.polygons}, "
+                f"id={hex(id(self))})"
+            )
+
+
 class BaseCanvas(ITransformable):
     def __init__(
             self,
@@ -330,6 +417,8 @@ class BaseCanvas(ITransformable):
         self.points: List[PointType] = list(points)
         self.edges: List[EdgeType] = list(edges)
         self.polygons: List[PolygonType] = list(polygons)
+        self.objects: List[ObjectType] = []
+        ITransformable.__init__(self)
 
     @override
     def get_shape_points(self) -> List[PointType]:
@@ -338,139 +427,80 @@ class BaseCanvas(ITransformable):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(width={self.width}, height={self.height}, "
-            f"polygons={self.polygons}, id={hex(id(self))})"
+            f"objects={self.objects}, id={hex(id(self))})"
         )
     
-    def __add__(self, shape: Shape) -> Self:
-        new = self.__class__(**self.__dict__)
-        if (isinstance(point := shape, BasePoint)):
-            if point not in new.points:
-                new.points.append(point)
-        elif isinstance(edge := shape, BaseEdge):
-            for point in edge:
-                new = new.__add__(point)
-            if edge not in new.edges:
-                new.edges.append(edge)
-        elif isinstance(polygon := shape, BasePolygon):
-            for edge in polygon:
-                new = new.__add__(edge)
-            if polygon not in new.polygons:
-                new.polygons.append(polygon)
+    def __add__(self, obj: Shape | ObjectType) -> Self:
+        new = copy.copy(self)
+        new.points = list(self.points)
+        new.edges = list(self.edges)
+        new.polygons = list(self.polygons)
+        new.objects = list(self.objects)
+        new += obj
         return new
     
-    def __iadd__(self, shape: Shape) -> Self:
-        if (isinstance(point := shape, BasePoint)):
+    def __iadd__(self, obj: Shape | ObjectType) -> Self:
+        if (isinstance(point := obj, BasePoint)):
             if point not in self.points:
                 self.points.append(point)
-        elif isinstance(edge := shape, BaseEdge):
+        elif isinstance(edge := obj, BaseEdge):
             for point in edge:
                 self.__iadd__(point)
             if edge not in self.edges:
                 self.edges.append(edge)
-        elif isinstance(polygon := shape, BasePolygon):
+        elif isinstance(polygon := obj, BasePolygon):
             for edge in polygon:
                 self.__iadd__(edge)
             if polygon not in self.polygons:
                 self.polygons.append(polygon)
+        elif isinstance(obj := obj, BaseObject):
+            for point in obj.points:
+                self.__iadd__(point)
+            for edge in obj.edges:
+                self.__iadd__(edge)
+            for polygon in obj.polygons:
+                self.__iadd__(polygon)
+            if obj not in self.objects:
+                self.objects.append(obj)
+
         return self
     
-    def __sub__(self, shape: Shape) -> Self:
-        new = self.__class__(**self.__dict__)
-        if isinstance(shape, BasePoint):
-            new.points.remove(shape)
-        elif isinstance(shape, BaseEdge):
-            new.edges.remove(shape)
-        else:
-            new.polygons.remove(shape)
+    def __sub__(self, obj: Shape | ObjectType) -> Self:
+        new = copy.copy(self)
+        new.points = list(self.points)
+        new.edges = list(self.edges)
+        new.polygons = list(self.polygons)
+        new.objects = list(self.objects)
+        new -= obj
         return new
     
-    def __isub__(self, shape: Shape) -> Self:
-        if isinstance(shape, BasePoint):
-            self.points.remove(shape)
-        elif isinstance(shape, BaseEdge):
-            self.edges.remove(shape)
+    def __isub__(self, obj: Shape | ObjectType) -> Self:
+        if isinstance(obj, BasePoint):
+            self.points.remove(obj)
+        elif isinstance(obj, BaseEdge):
+            self.edges.remove(obj)
+        elif isinstance(obj, BasePolygon):
+            self.polygons.remove(obj)
         else:
-            self.polygons.remove(shape)
+            self.objects.remove(obj)
+
         return self
     
     def clear(self) -> None:
         self.points.clear()
         self.edges.clear()
         self.polygons.clear()
+        self.objects.clear()
 
+class Vertex(Point):
+    def __init__(self, x: Number, y: Number, z: Number, w: Number = 1.0, u : Number = 0.0, v: Number = 0.0, normal: tuple[Number, Number, Number] | None = None) -> None:
+        super().__init__(x, y, z, w)
+        self.u = u
+        self.v = v
+        self.normal = normal
 
-class ObjLoaderError(ValueError):
-    pass
-
-class ObjLoader:
-    def __init__(self) -> None:
-        self.points: List[Point] = []
-        self.edges: List[Edge] = []
-        self.polygons: List[Polygon] = []
-    
-    def load(self, filepath: str) -> None:
-        if not filepath.endswith('.obj'):
-            raise ObjLoaderError("Only .obj files are supported.")
-
-        with open(filepath, 'r') as file:
-            lines = file.readlines()
-        
-        for line in lines:
-            try:
-                parts = line.strip().split()
-                if not parts:
-                    continue
-                
-                if parts[0] == 'v':
-                    x, y, z = map(float, parts[1:4])
-                    w = float(parts[4]) if len(parts) > 4 else 1.0
-                    self.points.append(Point(x, y, z, w))
-
-                elif parts[0] == 'vt':
-                    continue
-
-                elif parts[0] == 'vn':
-                    continue
-                
-                elif parts[0] == 'f':
-                    vertex_indices = [int(part.split('/')[0]) - 1 for part in parts[1:]]
-                    face_points = [self.points[idx] for idx in vertex_indices]
-                    
-                    if len(face_points) == 2:
-                        self.edges.append(Edge(face_points))
-                    elif len(face_points) > 2:
-                        edges = []
-                        for i in range(len(face_points)):
-                            edge = Edge([face_points[i], face_points[(i + 1) % len(face_points)]])
-                            edges.append(edge)
-                        self.polygons.append(Polygon(edges))
-
-            except (ValueError, IndexError) as e:
-                raise ObjLoaderError(f"Error parsing line: '{line.strip()}'. {e}") from e
-    
-    def __call__(self, dx: Number = 0.0, dy: Number = 0.0, dz: Number = 0.0) -> Tuple[List[Point], List[Edge], List[Polygon]]:
-        points, edges, polygons = self.points, self.edges, self.polygons
-
-        if dx != 0.0 or dy != 0.0 or dz != 0.0:
-            for point in points:
-                point.x += dx
-                point.y += dy
-                point.z += dz
-
-            for edge in edges:
-                for point in edge.points:
-                    point.x += dx
-                    point.y += dy
-                    point.z += dz
-            
-            for polygon in polygons:
-                for edge in polygon.edges:
-                    for point in edge.points:
-                        point.x += dx
-                        point.y += dy
-                        point.z += dz
-
-        return points, edges, polygons
-    
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(points={len(self.points)}, edges={len(self.edges)}, polygons={len(self.polygons)}, id={hex(id(self))})"
+        return (
+            f"{self.__class__.__name__}({self.x}, {self.y}, {self.z}, "
+            f"w={self.w}, uv=({self.u}, {self.v}), normal={self.normal}, id={hex(id(self))})"
+        )
